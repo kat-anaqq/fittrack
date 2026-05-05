@@ -26,7 +26,7 @@ import {
   FileSpreadsheet
 } from 'lucide-react';
 
-// --- ИМПОРТЫ И НАСТРОЙКА FIREBASE ---
+// --- ИМПОРТЫ И НАСТРОЙКА FIREBASE (проверяю изменения на работоспособность) ---
 import { initializeApp } from "firebase/app";
 import { getAnalytics } from "firebase/analytics";
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "firebase/auth";
