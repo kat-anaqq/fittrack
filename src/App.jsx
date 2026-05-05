@@ -37,15 +37,16 @@ const db = getFirestore(app);
 try {
   enableIndexedDbPersistence(db).catch((err) => {
     if (err.code === 'failed-precondition') {
-      console.warn("Multiple tabs open, persistence enabled in only one.");
+      console.warn("Persistence failed: multiple tabs open.");
     } else if (err.code === 'unimplemented') {
-      console.warn("Browser doesn't support persistence.");
+      console.warn("Persistence failed: browser not supported.");
     }
   });
 } catch (e) {}
 
-// КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Удаляем слеши из APP_ID для путей Firestore
-const APP_ID = (typeof __app_id !== 'undefined' ? __app_id : 'fitrack-default').replace(/\//g, '_');
+// Очищаем APP_ID от слешей для путей Firestore
+const rawId = typeof __app_id !== 'undefined' ? __app_id : 'fitrack-default';
+const APP_ID = rawId.replace(/\//g, '_');
 
 const INITIAL_EXERCISES = [
   { id: '1', name: 'Жим лежа', bodyPart: 'Грудь' },
@@ -72,11 +73,11 @@ export default function App() {
   const [selectedExerciseForStats, setSelectedExerciseForStats] = useState(null);
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [isCalendarExpanded, setIsCalendarExpanded] = useState(false);
+  const [currentMonthView, setCurrentMonthView] = useState(new Date());
   const [isManagingExercises, setIsManagingExercises] = useState(false);
   const [exerciseToEdit, setExerciseToEdit] = useState(null);
 
-  const fileInputRef = useRef(null);
-
+  // --- ЛОГИКА АВТОРИЗАЦИИ ---
   useEffect(() => {
     const initAuth = async () => {
       try {
@@ -87,24 +88,22 @@ export default function App() {
         }
       } catch (error) {
         console.error("Auth error:", error);
-        setAuthError(error.code === 'auth/configuration-not-found' 
-          ? "Включите Anonymous вход в Firebase Console." 
-          : error.message);
+        setAuthError(error.message);
       }
     };
     initAuth();
     
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
-      setTimeout(() => setIsSyncing(false), 3000);
+      if (!currentUser) setIsSyncing(false);
     });
     return () => unsubscribe();
   }, []);
 
+  // --- СИНХРОНИЗАЦИЯ ДАННЫХ ---
   useEffect(() => {
     if (!user) return;
 
-    // Путь должен иметь 5 сегментов для коллекции: artifacts/APP_ID/users/UID/workouts
     const workoutsRef = collection(db, 'artifacts', APP_ID, 'users', user.uid, 'workouts');
     const exercisesRef = collection(db, 'artifacts', APP_ID, 'users', user.uid, 'exercises');
     const settingsRef = doc(db, 'artifacts', APP_ID, 'users', user.uid, 'settings', 'userSettings');
@@ -113,13 +112,11 @@ export default function App() {
       const w = snapshot.docs.map(d => d.data());
       setWorkouts(w.sort((a, b) => (b.startTime || 0) - (a.startTime || 0))); 
       setIsSyncing(false);
-    }, (err) => { console.error(err); setIsSyncing(false); });
+    });
 
     const unsubExercises = onSnapshot(exercisesRef, (snapshot) => {
       if (snapshot.empty) {
-        INITIAL_EXERCISES.forEach(ex => {
-          setDoc(doc(exercisesRef, ex.id), ex).catch(console.error);
-        });
+        INITIAL_EXERCISES.forEach(ex => setDoc(doc(exercisesRef, ex.id), ex));
       } else {
         setExercises(snapshot.docs.map(d => d.data()));
       }
@@ -144,6 +141,7 @@ export default function App() {
     document.documentElement.classList.toggle('dark', isDarkMode);
   }, [isDarkMode]);
 
+  // --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
   const generateId = () => Math.random().toString(36).substr(2, 9);
   const formatDate = (ts) => new Date(ts).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
   const toISODate = (date) => {
@@ -191,16 +189,7 @@ export default function App() {
     } catch (e) { console.error(e); }
   };
 
-  // Хелпер для иконок вкладок
-  const TabIcon = ({ tab, currentTab, isDesktop = false }) => {
-    const size = isDesktop ? 24 : 24;
-    const commonClass = currentTab === tab ? 'text-blue-500' : 'text-gray-400';
-    if (tab === 'stats') return <BarChart size={size} className={commonClass} />;
-    if (tab === 'workouts') return <List size={size} className={commonClass} />;
-    if (tab === 'settings') return <SettingsIcon size={size} className={commonClass} />;
-    return null;
-  };
-
+  // --- ЭКРАНЫ ---
   const renderStats = () => {
     const totalW = workouts.length;
     const totalV = workouts.reduce((s, w) => s + (w.volume || 0), 0);
@@ -237,31 +226,77 @@ export default function App() {
   const renderWorkouts = () => {
     const isoSelected = toISODate(selectedDate);
     const dayWorkouts = workouts.filter(w => toISODate(w.startTime) === isoSelected);
+    
+    // Календарная сетка
+    const daysInMonth = new Date(currentMonthView.getFullYear(), currentMonthView.getMonth() + 1, 0).getDate();
+    const firstDayIndex = (new Date(currentMonthView.getFullYear(), currentMonthView.getMonth(), 1).getDay() + 6) % 7; 
+    const prevMonth = () => setCurrentMonthView(new Date(currentMonthView.getFullYear(), currentMonthView.getMonth() - 1, 1));
+    const nextMonth = () => setCurrentMonthView(new Date(currentMonthView.getFullYear(), currentMonthView.getMonth() + 1, 1));
+
     const weekDays = getWeekDays(selectedDate);
+
     return (
       <div className="space-y-6 pb-24 md:pb-8 animate-in fade-in max-w-5xl mx-auto">
         <div className="flex justify-between items-center px-4 md:px-8 mt-6 md:mt-10">
           <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Тренировки</h1>
-          <button onClick={() => setIsCalendarExpanded(!isCalendarExpanded)} className="p-3 text-blue-500 bg-blue-50 dark:bg-blue-900/30 rounded-full shadow-sm"><Calendar size={24} /></button>
+          <button 
+            onClick={() => {
+              setIsCalendarExpanded(!isCalendarExpanded);
+              if (!isCalendarExpanded) setCurrentMonthView(new Date(selectedDate));
+            }} 
+            className={`p-3 rounded-full shadow-sm transition-colors ${isCalendarExpanded ? 'bg-blue-500 text-white' : 'text-blue-500 bg-blue-50 dark:bg-blue-900/30'}`}
+          >
+            {isCalendarExpanded ? <ChevronUp size={24} /> : <Calendar size={24} />}
+          </button>
         </div>
+
         <div className="px-4 md:px-8">
-          <div className="flex justify-between items-center bg-white dark:bg-gray-900 p-2 md:p-3 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-800 gap-1 md:gap-3">
-            {weekDays.map(d => {
-              const iso = toISODate(d);
-              const isSel = isoSelected === iso;
-              const hasW = workouts.some(w => toISODate(w.startTime) === iso);
-              return (
-                <button key={iso} onClick={() => setSelectedDate(d)} className={`flex flex-col items-center justify-center flex-1 aspect-[3/4] md:aspect-square rounded-2xl transition-all ${isSel ? 'bg-blue-500 text-white shadow-md scale-105' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-800'}`}>
-                  <span className="text-[10px] md:text-xs font-medium uppercase mb-1">{d.toLocaleDateString('ru-RU', {weekday: 'short'})}</span>
-                  <span className={`text-lg md:text-2xl font-bold leading-none ${isSel ? 'text-white' : 'text-gray-900 dark:text-gray-200'}`}>{d.getDate()}</span>
-                  {hasW && <div className={`w-1.5 h-1.5 rounded-full mt-1.5 ${isSel ? 'bg-white' : 'bg-blue-500'}`} />}
-                </button>
-              )
-            })}
-          </div>
+          {isCalendarExpanded ? (
+            <div className="bg-white dark:bg-gray-900 p-6 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-800 animate-in slide-in-from-top-4 duration-200">
+              <div className="flex justify-between items-center mb-6">
+                <button onClick={prevMonth} className="p-2 text-gray-400 hover:text-blue-500 bg-gray-50 dark:bg-gray-800 rounded-full"><ChevronLeft size={20}/></button>
+                <span className="font-bold text-lg capitalize">{currentMonthView.toLocaleString('ru-RU', {month: 'long', year: 'numeric'})}</span>
+                <button onClick={nextMonth} className="p-2 text-gray-400 hover:text-blue-500 bg-gray-50 dark:bg-gray-800 rounded-full"><ChevronRight size={20}/></button>
+              </div>
+              <div className="grid grid-cols-7 gap-1 text-center mb-2">
+                {['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map(day => <div key={day} className="text-xs font-bold text-gray-400">{day}</div>)}
+              </div>
+              <div className="grid grid-cols-7 gap-1">
+                {Array.from({length: firstDayIndex}).map((_, i) => <div key={`empty-${i}`} />)}
+                {Array.from({length: daysInMonth}).map((_, i) => {
+                  const dayDate = new Date(currentMonthView.getFullYear(), currentMonthView.getMonth(), i + 1);
+                  const iso = toISODate(dayDate);
+                  const isSel = isoSelected === iso;
+                  const hasW = workouts.some(w => toISODate(w.startTime) === iso);
+                  return (
+                    <button key={iso} onClick={() => { setSelectedDate(dayDate); setIsCalendarExpanded(false); }} className={`h-10 w-full rounded-xl flex flex-col items-center justify-center relative ${isSel ? 'bg-blue-500 text-white' : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100'}`}>
+                      <span className="text-sm font-bold">{i + 1}</span>
+                      {hasW && <div className={`w-1 h-1 rounded-full absolute bottom-1 ${isSel ? 'bg-white' : 'bg-blue-500'}`} />}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            <div className="flex justify-between items-center bg-white dark:bg-gray-900 p-2 md:p-3 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-800 gap-1 md:gap-3">
+              {weekDays.map(d => {
+                const iso = toISODate(d);
+                const isSel = isoSelected === iso;
+                const hasW = workouts.some(w => toISODate(w.startTime) === iso);
+                return (
+                  <button key={iso} onClick={() => setSelectedDate(d)} className={`flex flex-col items-center justify-center flex-1 aspect-[3/4] md:aspect-square rounded-2xl transition-all ${isSel ? 'bg-blue-500 text-white shadow-md scale-105' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-800'}`}>
+                    <span className="text-[10px] md:text-xs font-medium uppercase mb-1">{d.toLocaleDateString('ru-RU', {weekday: 'short'})}</span>
+                    <span className={`text-lg md:text-2xl font-bold leading-none ${isSel ? 'text-white' : 'text-gray-900 dark:text-gray-200'}`}>{d.getDate()}</span>
+                    {hasW && <div className={`w-1.5 h-1.5 rounded-full mt-1.5 ${isSel ? 'bg-white' : 'bg-blue-500'}`} />}
+                  </button>
+                )
+              })}
+            </div>
+          )}
         </div>
+
         <div className="px-4 md:px-8">
-          <button onClick={() => setActiveWorkout({ id: generateId(), startTime: selectedDate.getTime(), exercises: [] })} className="w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold py-4 md:py-5 text-lg rounded-3xl flex items-center justify-center shadow-lg active:scale-95 transition-transform"><Plus size={24} className="mr-2" />Начать тренировку</button>
+          <button onClick={() => setActiveWorkout({ id: generateId(), startTime: selectedDate.getTime(), exercises: [] })} className="w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold py-4 md:py-5 text-lg rounded-3xl flex items-center justify-center shadow-lg active:scale-95 transition-transform"><Plus size={24} className="mr-2" />Добавить тренировку</button>
         </div>
         <div className="px-4 md:px-8 space-y-4">
           <h2 className="text-xl font-semibold capitalize">{formatDate(selectedDate.getTime())}</h2>
@@ -271,9 +306,7 @@ export default function App() {
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-               {dayWorkouts.map(w => (
-                 <WorkoutCard key={w.id} workout={w} weightUnit={weightUnit} user={user} onEdit={setActiveWorkout} />
-               ))}
+               {dayWorkouts.map(w => <WorkoutCard key={w.id} workout={w} weightUnit={weightUnit} user={user} onEdit={setActiveWorkout} />)}
             </div>
           )}
         </div>
@@ -309,7 +342,7 @@ export default function App() {
     return (
       <div className={`fixed inset-0 flex items-center justify-center p-6 ${isDarkMode ? 'dark bg-gray-950 text-white' : 'bg-[#f2f2f7] text-gray-900'}`}>
         <div className="flex flex-col items-center gap-4 animate-pulse text-blue-500">
-          <Dumbbell size={48} />
+          <Dumbbell size={48} className="animate-spin-slow" />
           <p className="font-medium text-gray-500">Синхронизация данных...</p>
         </div>
       </div>
@@ -319,14 +352,14 @@ export default function App() {
   return (
     <div className={`fixed inset-0 flex justify-center ${isDarkMode ? 'dark bg-gray-950' : 'bg-white'}`}>
       <div className="w-full h-full bg-[#f2f2f7] dark:bg-gray-950 relative overflow-hidden flex flex-col md:flex-row transition-colors">
-        {/* SIDEBAR */}
+        {/* SIDEBAR (ПК) */}
         <div className="hidden md:flex w-72 flex-col bg-white dark:bg-gray-900 border-r border-gray-100 dark:border-gray-800 p-6 z-40">
           <div className="flex items-center gap-3 mb-12 text-blue-500"><Dumbbell size={36} strokeWidth={2.5} /><h1 className="text-2xl font-extrabold tracking-tight">FitTrack</h1></div>
           <nav className="flex flex-col gap-3">
             {['stats', 'workouts', 'settings'].map(t => (
               <button key={t} onClick={() => setActiveTab(t)} className={`flex items-center gap-4 p-4 rounded-2xl transition-all ${activeTab === t ? 'bg-blue-500 shadow-md text-white' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-800'}`}>
-                <TabIcon tab={t} currentTab={activeTab} isDesktop />
-                <span className="font-semibold text-lg">{t === 'stats' ? 'Статистика' : t === 'workouts' ? 'Тренировки' : 'Настройки'}</span>
+                {t === 'stats' && <BarChart />} {t === 'workouts' && <List />} {t === 'settings' && <SettingsIcon />}
+                <span className="font-semibold text-lg capitalize">{t === 'stats' ? 'Статистика' : t === 'workouts' ? 'Тренировки' : 'Настройки'}</span>
               </button>
             ))}
           </nav>
@@ -338,21 +371,22 @@ export default function App() {
           {activeTab === 'settings' && renderSettings()}
         </div>
 
-        {/* BOTTOM NAV */}
+        {/* BOTTOM NAV (МОБИЛКА) */}
         <div className="md:hidden absolute bottom-0 left-0 right-0 bg-white/80 dark:bg-gray-900/80 backdrop-blur-md border-t border-gray-100 dark:border-gray-800 pb-safe pt-2 px-6 flex justify-between z-40">
           {['stats', 'workouts', 'settings'].map(t => (
             <button key={t} onClick={() => setActiveTab(t)} className={`flex flex-col items-center p-2 ${activeTab === t ? 'text-blue-500' : 'text-gray-400'}`}>
-              <TabIcon tab={t} currentTab={activeTab} />
+              {t === 'stats' && <BarChart />} {t === 'workouts' && <List />} {t === 'settings' && <SettingsIcon />}
               <span className="text-[10px] font-medium mt-1 uppercase">{t === 'stats' ? 'Стат' : t === 'workouts' ? 'Трени' : 'Настр'}</span>
             </button>
           ))}
         </div>
 
+        {/* МОДАЛКИ */}
         {activeWorkout && <ActiveWorkoutModal workout={activeWorkout} setWorkout={setActiveWorkout} exercises={exercises} weightUnit={weightUnit} onFinish={handleFinishWorkout} onCancel={() => setActiveWorkout(null)} />}
         {selectedExerciseForStats && <ExerciseStatsModal exercise={selectedExerciseForStats} workouts={workouts} weightUnit={weightUnit} onClose={() => setSelectedExerciseForStats(null)} />}
         {isManagingExercises && <ManageExercisesModal exercises={exercises} onClose={() => setIsManagingExercises(false)} onAdd={() => setExerciseToEdit({ name: '', bodyPart: 'Грудь' })} onEdit={setExerciseToEdit} onDelete={(id) => deleteDoc(doc(db, 'artifacts', APP_ID, 'users', user.uid, 'exercises', id))} />}
         {exerciseToEdit && <ExerciseFormModal initialData={exerciseToEdit} onSave={(data) => {
-          const id = data.id || Math.random().toString(36).substr(2, 9);
+          const id = data.id || generateId();
           setDoc(doc(db, 'artifacts', APP_ID, 'users', user.uid, 'exercises', id), { ...data, id });
           setExerciseToEdit(null);
         }} onClose={() => setExerciseToEdit(null)} />}
@@ -373,14 +407,9 @@ function WorkoutCard({ workout, weightUnit, user, onEdit }) {
             <button onClick={() => onEdit(workout)} className="text-gray-400 hover:text-blue-500 p-1"><Edit2 size={16} /></button>
             <button onClick={() => deleteDoc(doc(db, 'artifacts', APP_ID, 'users', user.uid, 'workouts', workout.id))} className="text-gray-400 hover:text-red-500 p-1"><Trash2 size={16} /></button>
           </div>
-          <div className="flex items-center text-sm text-gray-500 dark:text-gray-400 mt-1">
-            <Clock size={14} className="mr-1" />
-            {new Date(workout.startTime).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}
-          </div>
+          <div className="flex items-center text-sm text-gray-500 dark:text-gray-400 mt-1"><Clock size={14} className="mr-1" />{new Date(workout.startTime).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}</div>
         </div>
-        <div className="bg-gray-100 dark:bg-gray-800 px-3 py-1 rounded-full text-sm font-medium text-gray-700 dark:text-gray-300">
-          {workout.volume} {weightUnit}
-        </div>
+        <div className="bg-gray-100 dark:bg-gray-800 px-3 py-1 rounded-full text-sm font-medium text-gray-700 dark:text-gray-300">{workout.volume} {weightUnit}</div>
       </div>
       <div className="space-y-2">
         {workout.exercises.map(ex => (
@@ -397,12 +426,12 @@ function WorkoutCard({ workout, weightUnit, user, onEdit }) {
 function ActiveWorkoutModal({ workout, setWorkout, exercises, weightUnit, onFinish, onCancel }) {
   const [isSelecting, setIsSelecting] = useState(false);
   return (
-    <div className="fixed inset-0 z-50 flex flex-col md:flex-row md:items-center md:justify-center bg-[#f2f2f7] dark:bg-gray-950 md:bg-black/50 md:backdrop-blur-sm">
-      <div className="flex-1 md:flex-none w-full h-full md:h-[90vh] md:max-w-3xl bg-[#f2f2f7] dark:bg-gray-950 md:rounded-[32px] md:shadow-2xl flex flex-col overflow-hidden relative">
-        <div className="bg-white dark:bg-gray-900 px-4 py-6 border-b border-gray-100 flex justify-between items-center z-10">
+    <div className="fixed inset-0 z-50 flex flex-col md:items-center md:justify-center bg-black/50 backdrop-blur-sm p-0 md:p-6">
+      <div className="bg-[#f2f2f7] dark:bg-gray-950 w-full h-full md:max-w-2xl md:h-[90vh] md:rounded-[32px] flex flex-col overflow-hidden shadow-2xl relative">
+        <div className="bg-white dark:bg-gray-900 px-6 py-5 flex justify-between items-center shadow-sm z-10">
           <button onClick={onCancel} className="text-gray-500">Отменить</button>
           <h2 className="text-lg font-bold">Тренировка</h2>
-          <button onClick={onFinish} className="text-blue-500 font-bold bg-blue-50 px-4 py-1.5 rounded-full">Завершить</button>
+          <button onClick={onFinish} className="bg-blue-500 text-white px-4 py-2 rounded-full font-bold">Завершить</button>
         </div>
         <div className="flex-1 overflow-y-auto p-4 space-y-6">
           {workout.exercises.map((wEx) => (
@@ -420,19 +449,22 @@ function ActiveWorkoutModal({ workout, setWorkout, exercises, weightUnit, onFini
                     <button onClick={() => setWorkout({...workout, exercises: workout.exercises.map(ex => ex.id === wEx.id ? {...ex, sets: ex.sets.map(s => s.id === set.id ? {...s, completed: !s.completed} : s)} : ex)})} className={`w-10 h-10 rounded-xl flex items-center justify-center ${set.completed ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-400'}`}><Check size={20} /></button>
                   </div>
                 ))}
-                <button onClick={() => setWorkout({...workout, exercises: workout.exercises.map(ex => ex.id === wEx.id ? {...ex, sets: [...ex.sets, {id: Math.random().toString(), weight: ex.sets[ex.sets.length-1]?.weight || '', reps: '', completed: false}]} : ex)})} className="w-full mt-4 py-3 text-blue-500 font-bold flex items-center justify-center"><Plus size={20} /> Сет</button>
+                <button onClick={() => setWorkout({...workout, exercises: workout.exercises.map(ex => ex.id === wEx.id ? {...ex, sets: [...ex.sets, {id: Math.random().toString(), weight: '', reps: '', completed: false}]} : ex)})} className="w-full mt-4 py-3 text-blue-500 font-bold flex items-center justify-center"><Plus size={20} /> Сет</button>
               </div>
             </div>
           ))}
           <button onClick={() => setIsSelecting(true)} className="w-full py-5 border-2 border-dashed border-blue-200 text-blue-500 font-bold rounded-3xl flex items-center justify-center"><Plus size={24} /> Упражнение</button>
         </div>
         {isSelecting && (
-          <div className="absolute inset-0 bg-white dark:bg-gray-900 z-50 flex flex-col p-4">
-            <button onClick={() => setIsSelecting(false)} className="self-end p-2"><X size={32} /></button>
-            <div className="space-y-3 mt-4">
+          <div className="absolute inset-0 bg-white dark:bg-gray-900 z-50 flex flex-col animate-in slide-in-from-bottom-10">
+            <div className="p-6 flex justify-between items-center border-b">
+              <h2 className="text-xl font-bold">Выбрать упражнение</h2>
+              <button onClick={() => setIsSelecting(false)}><X size={32} /></button>
+            </div>
+            <div className="p-4 space-y-3 overflow-y-auto">
               {exercises.map(ex => (
-                <button key={ex.id} onClick={() => { setWorkout({...workout, exercises: [...workout.exercises, {id: Math.random().toString(), exerciseId: ex.id, name: ex.name, sets: [{id: Math.random().toString(), weight: '', reps: '', completed: false}]}]}); setIsSelecting(false); }} className="w-full p-5 bg-gray-50 rounded-2xl text-left">
-                  <div className="font-bold">{ex.name}</div>
+                <button key={ex.id} onClick={() => { setWorkout({...workout, exercises: [...workout.exercises, {id: Math.random().toString(), exerciseId: ex.id, name: ex.name, sets: [{id: Math.random().toString(), weight: '', reps: '', completed: false}]}]}); setIsSelecting(false); }} className="w-full p-5 bg-gray-50 rounded-2xl text-left hover:bg-blue-50">
+                  <div className="font-bold text-lg">{ex.name}</div>
                   <div className="text-sm text-gray-500">{ex.bodyPart}</div>
                 </button>
               ))}
@@ -447,20 +479,20 @@ function ActiveWorkoutModal({ workout, setWorkout, exercises, weightUnit, onFini
 function ExerciseStatsModal({ exercise, workouts, weightUnit, onClose }) {
   const history = workouts.filter(w => w.exercises.some(e => e.exerciseId === exercise.id));
   return (
-    <div className="fixed inset-0 z-50 flex flex-col md:items-center md:justify-center bg-black/50 backdrop-blur-sm">
-      <div className="flex-1 md:flex-none w-full h-full md:h-[80vh] md:max-w-2xl bg-[#f2f2f7] dark:bg-gray-950 md:rounded-[32px] flex flex-col overflow-hidden">
-        <div className="p-6 bg-white dark:bg-gray-900 flex items-center gap-4">
+    <div className="fixed inset-0 z-50 flex flex-col md:items-center md:justify-center bg-black/50 backdrop-blur-sm p-0 md:p-6">
+      <div className="bg-[#f2f2f7] dark:bg-gray-950 w-full h-full md:max-w-2xl md:rounded-[32px] flex flex-col overflow-hidden">
+        <div className="p-6 bg-white dark:bg-gray-900 flex items-center gap-4 border-b">
           <button onClick={onClose}><ChevronLeft size={32} /></button>
           <h2 className="text-2xl font-bold">{exercise.name}</h2>
         </div>
         <div className="p-6 overflow-y-auto space-y-4">
-          {history.map(w => {
+          {history.length === 0 ? <p className="text-center text-gray-500 py-10">История пуста</p> : history.map(w => {
             const exData = w.exercises.find(e => e.exerciseId === exercise.id);
             return (
-              <div key={w.id} className="bg-white dark:bg-gray-900 p-4 rounded-2xl shadow-sm">
-                <div className="font-bold text-blue-500">{new Date(w.startTime).toLocaleDateString()}</div>
-                <div className="mt-2 space-y-1">
-                  {exData.sets.map((s, i) => <div key={i} className="text-sm">{i+1}. {s.weight} {weightUnit} x {s.reps}</div>)}
+              <div key={w.id} className="bg-white dark:bg-gray-900 p-5 rounded-2xl shadow-sm border">
+                <div className="font-bold text-blue-500 mb-2">{new Date(w.startTime).toLocaleDateString()}</div>
+                <div className="grid grid-cols-2 gap-2">
+                  {exData.sets.map((s, i) => <div key={i} className="text-sm text-gray-600 bg-gray-50 p-2 rounded-lg">{i+1}. {s.weight} {weightUnit} x {s.reps}</div>)}
                 </div>
               </div>
             );
@@ -473,20 +505,20 @@ function ExerciseStatsModal({ exercise, workouts, weightUnit, onClose }) {
 
 function ManageExercisesModal({ exercises, onClose, onAdd, onEdit, onDelete }) {
   return (
-    <div className="fixed inset-0 z-50 flex flex-col md:items-center md:justify-center bg-black/50">
-      <div className="flex-1 md:flex-none w-full h-full md:h-[80vh] md:max-w-2xl bg-[#f2f2f7] dark:bg-gray-950 md:rounded-[32px] flex flex-col overflow-hidden">
-        <div className="p-6 bg-white dark:bg-gray-900 flex justify-between items-center">
+    <div className="fixed inset-0 z-50 flex flex-col md:items-center md:justify-center bg-black/50 backdrop-blur-sm p-0 md:p-6">
+      <div className="bg-[#f2f2f7] dark:bg-gray-950 w-full h-full md:max-w-2xl md:rounded-[32px] flex flex-col overflow-hidden">
+        <div className="p-6 bg-white dark:bg-gray-900 flex justify-between items-center border-b">
           <button onClick={onClose}><ChevronLeft size={32} /></button>
           <h2 className="text-xl font-bold">База упражнений</h2>
           <button onClick={onAdd} className="bg-blue-500 text-white p-2 rounded-full"><Plus /></button>
         </div>
         <div className="p-4 space-y-2 overflow-y-auto">
           {exercises.map(ex => (
-            <div key={ex.id} className="bg-white dark:bg-gray-900 p-4 rounded-2xl flex justify-between items-center">
+            <div key={ex.id} className="bg-white dark:bg-gray-900 p-4 rounded-2xl flex justify-between items-center shadow-sm">
               <div><div className="font-bold">{ex.name}</div><div className="text-sm text-gray-500">{ex.bodyPart}</div></div>
               <div className="flex gap-2">
-                <button onClick={() => onEdit(ex)}><Edit2 size={18} /></button>
-                <button onClick={() => onDelete(ex.id)}><Trash2 size={18} className="text-red-400"/></button>
+                <button onClick={() => onEdit(ex)} className="p-2 bg-gray-50 rounded-full text-gray-400 hover:text-blue-500"><Edit2 size={18} /></button>
+                <button onClick={() => onDelete(ex.id)} className="p-2 bg-gray-50 rounded-full text-gray-400 hover:text-red-500"><Trash2 size={18}/></button>
               </div>
             </div>
           ))}
@@ -500,11 +532,11 @@ function ExerciseFormModal({ initialData, onSave, onClose }) {
   const [name, setName] = useState(initialData?.name || '');
   const [part, setPart] = useState(initialData?.bodyPart || 'Грудь');
   return (
-    <div className="fixed inset-0 z-[60] bg-black/50 flex items-center justify-center p-4">
-      <div className="bg-white dark:bg-gray-900 w-full max-w-sm rounded-3xl p-6">
+    <div className="fixed inset-0 z-[60] bg-black/50 flex items-center justify-center p-4 backdrop-blur-sm">
+      <div className="bg-white dark:bg-gray-900 w-full max-w-sm rounded-3xl p-6 shadow-2xl">
         <h2 className="text-xl font-bold mb-4">{initialData?.id ? 'Изменить' : 'Новое упражнение'}</h2>
-        <input value={name} onChange={e => setName(e.target.value)} className="w-full bg-gray-100 p-4 rounded-2xl mb-4" placeholder="Название"/>
-        <select value={part} onChange={e => setPart(e.target.value)} className="w-full bg-gray-100 p-4 rounded-2xl mb-6">
+        <input value={name} onChange={e => setName(e.target.value)} className="w-full bg-gray-100 dark:bg-gray-800 p-4 rounded-2xl mb-4 outline-none border focus:border-blue-500" placeholder="Название"/>
+        <select value={part} onChange={e => setPart(e.target.value)} className="w-full bg-gray-100 dark:bg-gray-800 p-4 rounded-2xl mb-6 outline-none border focus:border-blue-500">
           {['Грудь', 'Спина', 'Ноги', 'Плечи', 'Бицепс', 'Трицепс', 'Пресс', 'Кардио'].map(p => <option key={p} value={p}>{p}</option>)}
         </select>
         <div className="flex gap-3">
